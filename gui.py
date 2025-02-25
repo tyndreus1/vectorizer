@@ -1,52 +1,48 @@
 import os
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import (QMainWindow, QLabel, QPushButton, QSlider, QFileDialog,
-                             QHBoxLayout, QVBoxLayout, QWidget, QGridLayout, QComboBox, QSizePolicy)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QImage
-from processing import (
-    apply_enhancements,
-    process_with_ai_model,
-    crop_with_svg
+from PyQt5.QtCore import Qt, QRectF
+from PyQt5.QtGui import QImage, QPixmap, QTransform
+from PyQt5.QtWidgets import (
+    QMainWindow, QLabel, QPushButton, QSlider, QFileDialog,
+    QHBoxLayout, QVBoxLayout, QWidget, QGridLayout, QComboBox, QSizePolicy,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsColorizeEffect
 )
+from PyQt5.QtSvg import QGraphicsSvgItem
+from processing import apply_enhancements, process_with_ai_model
 
 class LineDrawingApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.image = None
-        self.processed_image = None
-        self.cropped_image = None
+        self.image = None             # Original image (cv2 BGR)
+        self.processed_image = None   # Processed image (cv2; may be grayscale or color)
+        self.cropped_image = None     # Final cropped image (numpy array)
+        self.pixmap_item = None       # QGraphicsPixmapItem for the processed image
+        self.overlay_item = None      # QGraphicsSvgItem for the overlay border
+        self.current_svg_path = None  # Currently loaded SVG file path for border overlay
         self.initUI()
 
     def initUI(self):
-        # Main window settings
         self.setWindowTitle('Line Drawing App')
         self.setGeometry(100, 100, 1400, 800)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Layouts
+        # Create layouts for left and right panels
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
         right_layout = QVBoxLayout()
         slider_layout = QGridLayout()
 
-        # Labels to display images
+        # Left panel: original image preview and enhancement controls
         self.loaded_image_label = QLabel(self)
         self.loaded_image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.loaded_image_label.setAlignment(Qt.AlignCenter)
         self.loaded_image_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #000;")
 
-        self.processed_image_label = QLabel(self)
-        self.processed_image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.processed_image_label.setAlignment(Qt.AlignCenter)
-        self.processed_image_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #000;")
-
-        # Load and Save buttons
         self.load_button = QPushButton('Load Image', self)
         self.save_button = QPushButton('Save Image', self)
 
-        # Enhancement sliders with labels
+        # Enhancement sliders
         self.brightness_label = QLabel('Brightness', self)
         self.brightness_slider = QSlider(Qt.Horizontal)
         self.brightness_slider.setRange(0, 100)
@@ -87,26 +83,7 @@ class LineDrawingApp(QMainWindow):
         self.method_combo.addItem('Threshold')
         self.method_combo.addItem('Edge Detection')
 
-        # Cropper drop menu and button
-        self.cropper_label = QLabel('Crop Shape', self)
-        self.cropper_combo = QComboBox(self)
-        self.load_cropper_files()  # Load cropper SVG files from /cropper folder
-        self.crop_button = QPushButton('Crop Image', self)
-
-        # Connect buttons and sliders
-        self.load_button.clicked.connect(self.load_image)
-        self.save_button.clicked.connect(self.save_image)
-        self.brightness_slider.valueChanged.connect(self.update_image)
-        self.contrast_slider.valueChanged.connect(self.update_image)
-        self.sharpness_slider.valueChanged.connect(self.update_image)
-        self.blur_slider.valueChanged.connect(self.update_image)
-        self.edge_sensitivity_slider.valueChanged.connect(self.update_image)
-        self.threshold_slider.valueChanged.connect(self.update_image)
-        self.line_thickness_slider.valueChanged.connect(self.update_image)
-        self.method_combo.currentIndexChanged.connect(self.update_image)
-        self.crop_button.clicked.connect(self.crop_image)
-
-        # Add widgets to slider layout
+        # Assemble slider layout
         slider_layout.addWidget(self.brightness_label, 0, 0)
         slider_layout.addWidget(self.brightness_slider, 0, 1)
         slider_layout.addWidget(self.contrast_label, 1, 0)
@@ -124,45 +101,94 @@ class LineDrawingApp(QMainWindow):
         slider_layout.addWidget(self.method_label, 7, 0)
         slider_layout.addWidget(self.method_combo, 7, 1)
 
-        # Add widgets to left layout
         left_layout.addWidget(self.load_button)
         left_layout.addWidget(self.loaded_image_label)
         left_layout.addLayout(slider_layout)
         left_layout.addWidget(self.save_button)
 
-        # Add widgets to right layout
-        right_layout.addWidget(self.processed_image_label)
+        # Right panel: QGraphicsView for processed image and border overlay controls
+        self.crop_view = QGraphicsView(self)
+        self.crop_view.setMinimumSize(500, 500)
+        self.scene = QGraphicsScene(self)
+        self.crop_view.setScene(self.scene)
+
+        # Overlay adjustment controls
+        self.overlay_scale_label = QLabel('Overlay Scale', self)
+        self.overlay_scale_slider = QSlider(Qt.Horizontal)
+        self.overlay_scale_slider.setRange(50, 200)
+        self.overlay_scale_slider.setValue(100)
+
+        self.overlay_x_label = QLabel('Overlay X Offset', self)
+        self.overlay_x_slider = QSlider(Qt.Horizontal)
+        self.overlay_x_slider.setRange(-200, 200)
+        self.overlay_x_slider.setValue(0)
+
+        self.overlay_y_label = QLabel('Overlay Y Offset', self)
+        self.overlay_y_slider = QSlider(Qt.Horizontal)
+        self.overlay_y_slider.setRange(-200, 200)
+        self.overlay_y_slider.setValue(0)
+
+        self.cropper_label = QLabel('Crop Border (SVG)', self)
+        self.cropper_combo = QComboBox(self)
+        self.load_cropper_files()  # Load SVG files from the cropper folder
+
+        self.load_overlay_button = QPushButton('Load Border Overlay', self)
+        self.crop_button = QPushButton('Crop Image', self)
+
+        right_layout.addWidget(self.crop_view)
         right_layout.addWidget(self.cropper_label)
         right_layout.addWidget(self.cropper_combo)
+        right_layout.addWidget(self.load_overlay_button)
+        right_layout.addWidget(self.overlay_scale_label)
+        right_layout.addWidget(self.overlay_scale_slider)
+        right_layout.addWidget(self.overlay_x_label)
+        right_layout.addWidget(self.overlay_x_slider)
+        right_layout.addWidget(self.overlay_y_label)
+        right_layout.addWidget(self.overlay_y_slider)
         right_layout.addWidget(self.crop_button)
 
-        # Add left and right layouts to main layout
         main_layout.addLayout(left_layout)
         main_layout.addLayout(right_layout)
-
-        # Set the main layout in a central widget
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
+        # Connect signals
+        self.load_button.clicked.connect(self.load_image)
+        self.save_button.clicked.connect(self.save_image)
+        self.brightness_slider.valueChanged.connect(self.update_image)
+        self.contrast_slider.valueChanged.connect(self.update_image)
+        self.sharpness_slider.valueChanged.connect(self.update_image)
+        self.blur_slider.valueChanged.connect(self.update_image)
+        self.edge_sensitivity_slider.valueChanged.connect(self.update_image)
+        self.threshold_slider.valueChanged.connect(self.update_image)
+        self.line_thickness_slider.valueChanged.connect(self.update_image)
+        self.method_combo.currentIndexChanged.connect(self.update_image)
+
+        self.load_overlay_button.clicked.connect(self.load_overlay)
+        self.overlay_scale_slider.valueChanged.connect(self.update_overlay_transform)
+        self.overlay_x_slider.valueChanged.connect(self.update_overlay_transform)
+        self.overlay_y_slider.valueChanged.connect(self.update_overlay_transform)
+        self.crop_button.clicked.connect(self.crop_image)
+
     def load_cropper_files(self):
-        """
-        Loads SVG files from the /cropper directory and populates the cropper combo box.
-        """
         cropper_folder = os.path.join(os.getcwd(), "cropper")
         if os.path.exists(cropper_folder):
             for file in os.listdir(cropper_folder):
                 if file.lower().endswith(".svg"):
                     self.cropper_combo.addItem(file, os.path.join(cropper_folder, file))
         else:
-            # If folder doesn't exist, add a default item
             self.cropper_combo.addItem("No cropper files found")
 
     def load_image(self):
         options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(self, "Load Image", "",
-                                                   "All Files (*);;Image Files (*.png;*.jpg;*.bmp)",
-                                                   options=options)
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Image",
+            "",
+            "Image Files (*.png *.jpg *.bmp);;All Files (*)",
+            options=options
+        )
         if file_name:
             self.image = cv2.imread(file_name)
             if self.image is None:
@@ -172,25 +198,18 @@ class LineDrawingApp(QMainWindow):
             self.update_image()
 
     def save_image(self):
-        if self.cropped_image is not None:
+        save_image = self.cropped_image if self.cropped_image is not None else self.processed_image
+        if save_image is not None:
             options = QFileDialog.Options()
-            file_name, _ = QFileDialog.getSaveFileName(self, "Save Image", "",
-                                                       "PNG Files (*.png);;JPG Files (*.jpg);;BMP Files (*.bmp);;SVG Files (*.svg)",
-                                                       options=options)
+            file_name, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Image",
+                "",
+                "PNG Files (*.png);;JPG Files (*.jpg);;BMP Files (*.bmp)",
+                options=options
+            )
             if file_name:
-                if file_name.endswith('.svg'):
-                    # For saving as SVG, you may call an SVG export function (not implemented here)
-                    print("Saving as SVG is not implemented for cropped images")
-                else:
-                    cv2.imwrite(file_name, self.cropped_image)
-        elif self.processed_image is not None:
-            # Fallback: save the processed image if no cropping was performed
-            options = QFileDialog.Options()
-            file_name, _ = QFileDialog.getSaveFileName(self, "Save Image", "",
-                                                       "PNG Files (*.png);;JPG Files (*.jpg);;BMP Files (*.bmp)",
-                                                       options=options)
-            if file_name:
-                cv2.imwrite(file_name, self.processed_image)
+                cv2.imwrite(file_name, save_image)
 
     def update_image(self):
         if self.image is not None:
@@ -207,33 +226,136 @@ class LineDrawingApp(QMainWindow):
             enhanced_image = apply_enhancements(self.image, params)
             self.processed_image = process_with_ai_model(enhanced_image, params)
             self.display_image(enhanced_image, self.loaded_image_label, scale=0.7)
-            self.display_image(self.processed_image, self.processed_image_label, is_gray=True, scale=0.7)
+            self.refreshCropView()
+            self.cropped_image = None
+
+    def refreshCropView(self):
+        if self.processed_image is None:
+            return
+        # Convert processed_image to QImage
+        if len(self.processed_image.shape) == 2:
+            qformat = QImage.Format_Grayscale8
+            image_data = self.processed_image
+            bytes_per_line = self.processed_image.shape[1]
+        else:
+            rgb_image = cv2.cvtColor(self.processed_image, cv2.COLOR_BGR2RGB)
+            qformat = QImage.Format_RGB888
+            image_data = rgb_image
+            bytes_per_line = self.processed_image.shape[1] * 3
+
+        height, width = self.processed_image.shape[:2]
+        qimg = QImage(image_data.data, width, height, bytes_per_line, qformat)
+        pixmap = QPixmap.fromImage(qimg)
+
+        # If pixmap_item doesn't exist, create and add it; otherwise update its pixmap.
+        if self.pixmap_item is None:
+            self.pixmap_item = QGraphicsPixmapItem(pixmap)
+            self.pixmap_item.setZValue(0)
+            self.scene.addItem(self.pixmap_item)
+        else:
+            self.pixmap_item.setPixmap(pixmap)
+
+        # Ensure the overlay stays on top.
+        if self.overlay_item is not None:
+            if self.overlay_item.scene() is None:
+                self.scene.addItem(self.overlay_item)
+            self.overlay_item.setZValue(100)
+
+        self.scene.setSceneRect(0, 0, width, height)
+        self.crop_view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def load_overlay(self):
+        index = self.cropper_combo.currentIndex()
+        svg_path = self.cropper_combo.itemData(index)
+        if svg_path is None or not os.path.exists(svg_path):
+            print("Invalid SVG file selected.")
+            return
+        self.current_svg_path = svg_path
+        self.overlay_item = QGraphicsSvgItem(svg_path)
+        if self.processed_image is not None:
+            self.overlay_item.setPos(0, 0)
+            self.overlay_item.setTransform(QTransform())
+        self.overlay_item.setZValue(100)
+        effect = QGraphicsColorizeEffect()
+        effect.setColor(Qt.red)
+        self.overlay_item.setGraphicsEffect(effect)
+        # Instead of clearing the scene, simply add the overlay if not already present.
+        if self.overlay_item.scene() is None:
+            self.scene.addItem(self.overlay_item)
+        self.overlay_scale_slider.setValue(100)
+        self.overlay_x_slider.setValue(0)
+        self.overlay_y_slider.setValue(0)
+
+    def update_overlay_transform(self):
+        if self.overlay_item is None:
+            return
+        scale_val = self.overlay_scale_slider.value() / 100.0
+        x_offset = self.overlay_x_slider.value()
+        y_offset = self.overlay_y_slider.value()
+        transform = QTransform()
+        transform.translate(x_offset, y_offset)
+        transform.scale(scale_val, scale_val)
+        self.overlay_item.setTransform(transform)
 
     def crop_image(self):
-        """
-        Crops the processed image using the selected cropping vector (SVG).
-        """
-        if self.processed_image is not None:
-            cropper_index = self.cropper_combo.currentIndex()
-            cropper_path = self.cropper_combo.itemData(cropper_index)
-            if cropper_path is None:
-                print("No valid cropper file selected.")
-                return
-            self.cropped_image = crop_with_svg(self.processed_image, cropper_path)
-            self.display_image(self.cropped_image, self.processed_image_label, is_gray=False, scale=0.7)
+        if self.overlay_item is None or self.processed_image is None:
+            print("No overlay loaded or no processed image available.")
+            return
+        overlay_rect_scene = self.overlay_item.mapRectToScene(self.overlay_item.boundingRect())
+        print("Overlay scene rect:", overlay_rect_scene)
+        scene_rect = self.scene.sceneRect()
+        img_height, img_width = self.processed_image.shape[:2]
+        scale_x = img_width / scene_rect.width()
+        scale_y = img_height / scene_rect.height()
+        crop_x = int(overlay_rect_scene.x() * scale_x)
+        crop_y = int(overlay_rect_scene.y() * scale_y)
+        crop_w = int(overlay_rect_scene.width() * scale_x)
+        crop_h = int(overlay_rect_scene.height() * scale_y)
+        if crop_x < 0: crop_x = 0
+        if crop_y < 0: crop_y = 0
+        if crop_x + crop_w > img_width: crop_w = img_width - crop_x
+        if crop_y + crop_h > img_height: crop_h = img_height - crop_y
+        print("Cropping image at:", crop_x, crop_y, crop_w, crop_h)
+        self.cropped_image = self.processed_image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w].copy()
+
+        if len(self.cropped_image.shape) == 2:
+            qformat = QImage.Format_Grayscale8
+            bytes_per_line = self.cropped_image.shape[1]
+        else:
+            rgb_crop = cv2.cvtColor(self.cropped_image, cv2.COLOR_BGR2RGB)
+            qformat = QImage.Format_RGB888
+            bytes_per_line = self.cropped_image.shape[1] * 3
+
+        qimg = QImage(
+            self.cropped_image.data if len(self.cropped_image.shape)==2 else rgb_crop.data,
+            self.cropped_image.shape[1],
+            self.cropped_image.shape[0],
+            bytes_per_line,
+            qformat
+        )
+        crop_pixmap = QPixmap.fromImage(qimg)
+        crop_scene = QGraphicsScene(self)
+        crop_scene.addItem(QGraphicsPixmapItem(crop_pixmap))
+        self.crop_view.setScene(crop_scene)
+        print("Cropping complete.")
 
     def display_image(self, image, label, is_gray=False, scale=1.0):
         height, width = image.shape[:2]
         new_size = (int(width * scale), int(height * scale))
         resized_image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
-        qformat = QImage.Format_Indexed8 if is_gray else QImage.Format_RGB888
-        if len(resized_image.shape) == 3 and not is_gray:
-            if resized_image.shape[2] == 4:
-                qformat = QImage.Format_RGBA8888
-            else:
+        if is_gray or len(resized_image.shape) == 2:
+            qformat = QImage.Format_Grayscale8
+            image_data = resized_image
+            bytes_per_line = resized_image.shape[1]
+        else:
+            if resized_image.shape[2] == 3:
+                rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
                 qformat = QImage.Format_RGB888
-        out_image = QImage(resized_image, resized_image.shape[1], resized_image.shape[0],
-                           resized_image.strides[0], qformat)
-        if not is_gray:
-            out_image = out_image.rgbSwapped()
+                image_data = rgb_image
+                bytes_per_line = resized_image.shape[1] * 3
+            else:
+                image_data = resized_image
+                qformat = QImage.Format_RGB888
+                bytes_per_line = resized_image.shape[1] * 3
+        out_image = QImage(image_data.data, image_data.shape[1], image_data.shape[0], bytes_per_line, qformat)
         label.setPixmap(QPixmap.fromImage(out_image))
