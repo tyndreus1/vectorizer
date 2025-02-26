@@ -83,13 +83,13 @@ class LineDrawingApp(QMainWindow):
         # Connect buttons and sliders
         self.load_button.clicked.connect(self.load_image)
         self.save_button.clicked.connect(lambda: self.save_image())
-        self.brightness_slider.valueChanged.connect(self.update_all)  # Connect to update_all
-        self.contrast_slider.valueChanged.connect(self.update_all)   # Connect to update_all
-        self.sharpness_slider.valueChanged.connect(self.update_all)  # Connect to update_all
-        self.blur_slider.valueChanged.connect(self.update_all)       # Connect to update_all
-        self.edge_sensitivity_slider.valueChanged.connect(self.update_all) # Connect to update_all
-        self.threshold_slider.valueChanged.connect(self.update_all)    # Connect to update_all
-        self.line_thickness_slider.valueChanged.connect(self.update_all) # Connect to update_all
+        self.brightness_slider.valueChanged.connect(self.update_display_loaded_image)  # Connect to update_display_loaded_image
+        self.contrast_slider.valueChanged.connect(self.update_display_loaded_image)   # Connect to update_display_loaded_image
+        self.sharpness_slider.valueChanged.connect(self.update_display_loaded_image)  # Connect to update_display_loaded_image
+        self.blur_slider.valueChanged.connect(self.update_display_loaded_image)       # Connect to update_display_loaded_image
+        self.edge_sensitivity_slider.valueChanged.connect(self.update_display_loaded_image) # Connect to update_display_loaded_image
+        self.threshold_slider.valueChanged.connect(self.update_display_loaded_image)    # Connect to update_display_loaded_image
+        self.line_thickness_slider.valueChanged.connect(self.update_display_loaded_image) # Connect to update_display_loaded_image
 
         # Combo box for processing method
         self.processing_method_label = QLabel('Processing Method', self)
@@ -193,11 +193,27 @@ class LineDrawingApp(QMainWindow):
             self.is_displaying = True
             print("display_image: Finished")
 
+    def update_display_loaded_image(self):
+         if self.image is not None:
+            self.display_image(self.image)
+            
+            
+    def update_loaded_image(self):
+        if self.image is not None:
+            if not hasattr(self, '_display_timer'):
+                self._display_timer = QTimer()
+                self._display_timer.setSingleShot(True)
+                self._display_timer.timeout.connect(self._delayed_display)
+            self._display_timer.start(50)  # 50 ms delay
+
+    def _delayed_display(self):
+        self.display_image(self.image, self.loaded_image_label, scale=0.7)        
+
     def resizeEvent(self, event):
         """Override resizeEvent to scale the image when the window is resized."""
         print("resizeEvent: Triggered")
         if self.image is not None:
-           self.display_image(self.image)
+            self.display_image(self.image)
         print("resizeEvent: Finished")
 
 
@@ -235,7 +251,7 @@ class LineDrawingApp(QMainWindow):
         """Applies enhancements and processing, then displays the result."""
         if self.is_updating_all:
             print("update_all: Re-entrant call prevented")
-            return  # Prevent re-entrant calls
+          #  return  # Prevent re-entrant calls
 
         self.is_updating_all = True
         print("update_all: Starting...")
@@ -314,9 +330,6 @@ class LineDrawingApp(QMainWindow):
                 elif selected_filter == "BMP Files (*.bmp)" and not file_name.lower().endswith(".bmp"):
                     file_name += ".bmp"
                 elif selected_filter == "SVG Files (*.svg)" and not file_name.lower().endswith(".svg"):
-                    file_name += ".svg"
-
-                if file_name.endswith('.svg'):
                     self.convert_to_vector(file_name, self.processed_image, "svg")
                 else:
                     cv2.imwrite(file_name, self.processed_image)
